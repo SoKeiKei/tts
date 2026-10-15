@@ -29,3 +29,7 @@ py -3 -m venv .venv
 ```
 
 密钥写在各自目录的 `.env` 里，不要提交。豆包已用 `zh_female_vv_uranus_bigtts` 合成通过。MiniMax 上次测试因额度不足没有生成文件。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。
