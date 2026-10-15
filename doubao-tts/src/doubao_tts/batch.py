@@ -14,7 +14,6 @@ from doubao_tts.api import synthesize
 from doubao_tts.audio import atomic_write, commit_mp3, ensure_mp3_destination, measure_duration_ms, prepare_output, sha256_bytes
 from doubao_tts.errors import CliError
 from doubao_tts.models import Manifest, ManifestTask, ResolvedVoice, fingerprint, require_text
-from doubao_tts.script_rules import reject_cantonese_text
 from doubao_tts.settings import Settings, require_api_key
 from doubao_tts.voices import resolve_voice
 
@@ -101,7 +100,6 @@ def resolve_task(
 ) -> tuple[str, Path, ResolvedVoice, str]:
     _check_task_id(task.id)
     text = task_text(task, manifest_path)
-    reject_cantonese_text(text)
     alias = task.voice if task.voice is not None else defaults.voice
     voice_id = task.voice_id if task.voice_id is not None else defaults.voice_id
     resource = task.resource if task.resource is not None else defaults.resource

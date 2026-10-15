@@ -1,53 +1,73 @@
 # doubao-tts
 
-独立的豆包语音命令行工具。只调用火山引擎豆包 V3 HTTP 单向流式接口，不依赖其他 TTS 程序。
+独立的豆包 / 火山引擎语音命令行工具，提供语音合成、音频生成、声音复刻、音色设计和批量任务。
 
 ## 安装
 
+在本目录运行：
+
 ```powershell
-cd doubao-tts
 py -3 -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
-doubao-tts --help
+.\.venv\Scripts\doubao-tts.exe --help
 ```
+
+下文使用 `doubao-tts` 简写；未激活虚拟环境时，使用 `.\.venv\Scripts\doubao-tts.exe`。
 
 ## 配置
 
-复制 `.env.example` 为 `.env`，或在当前进程里设置：
+参考 `.env.example` 创建本目录的 `.env`，或设置当前进程环境变量：
 
 ```powershell
-$env:DOUBAO_TTS_API_KEY = "你的密钥"
+$env:DOUBAO_TTS_API_KEY = "<API_KEY>"
 $env:DOUBAO_TTS_RESOURCE_ID = "seed-tts-2.0"
-```
-
-复刻音色使用 `seed-icl-2.0`，并且要和该音色匹配。工具不会在预设和命令行资源 ID 不一致时静默改掉资源。
-
-本地音色别名写在 `%APPDATA%\doubao-tts\voices.json`，里面没有 API Key。
-
-粤语配音不要用这个工具。即使某些豆包音色标注了粤语方言，本项目的粤语也必须改用 `minimax-tts`，并且台词写成繁体字粤语口语。
-
-可用搭配：
-
-```powershell
-doubao-tts voices pairings
-doubao-tts voices pairings --language zh --json
-```
-
-## 常用命令
-
-```powershell
 doubao-tts doctor --json
-doubao-tts voices add narrator --voice-id "<DOUBAO_SPEAKER_ID>" --resource seed-tts-2.0
-doubao-tts synth --text "今天我们来学 Apple。" --voice narrator --out ".\audio\ep01.mp3" --json
-doubao-tts batch --manifest .\examples\batch.json --output-dir .\audio --json
-doubao-tts batch --manifest .\examples\batch.json --output-dir .\audio --resume --json
 ```
 
-`--json` 时 stdout 只有一个 JSON 对象。失败时 `ok` 为 false，进程退出码非 0。`--dry-run` 不调用接口，也不返回虚构的音频路径或时长。
+工具从当前工作目录读取 `.env`。音色别名默认保存在系统用户配置目录，可用 `DOUBAO_TTS_CONFIG_DIR` 覆盖；具体位置可查看 `doctor --json` 的 `voices_path`。
 
-已有文件默认不覆盖。批量任务在输入哈希、音频哈希和 meta 都对得上时，`--resume` 会跳过，避免重复计费。
+`doctor` 检查本地密钥是否配置、目录保存条件和音频解析依赖，不查询账号余额，也不验证远端音色授权。
 
-为避免重复计费，请求可能已经送达后发生的断线或超时不会自动重试，错误结果会带上 `may_have_been_billed: true`。尚未建立连接的失败和明确的限流可以有限重试。批量任务遇到配置、授权或余额问题会停止后续提交；单项保存失败会保留整批的完成情况。
+## 选择能力
+
+| 命令 | 用途 |
+| --- | --- |
+| `synth` | 文本生成 MP3，支持文本文件或标准输入 |
+| `batch` | 按清单批量合成，支持检查和恢复 |
+| `create` | 用提示词生成环境音、对白和音效，使用 `seed-audio-1.0` |
+| `clone` | 使用样本注册复刻音色并尝试保存试听 |
+| `design` | 用文字或图片设计音色，需要可用的 `speaker_id` |
+| `voice-status` | 查询复刻或设计音色的状态 |
+| `voices` | 管理本地别名、查看静态推荐搭配 |
+
+语言和文本由调用方选择，不根据文字中的个别汉字拒绝任务，也不强制改用其他供应商。是否支持所需语言由音色与服务决定；推荐列表未列出某语言，不等于服务不支持。
+
+## 示例
+
+```powershell
+doubao-tts voices pairings --language zh --json
+doubao-tts synth --text "今天学习红色。" --voice-id "zh_female_vv_uranus_bigtts" --resource seed-tts-2.0 --out ".\audio\line.mp3" --json
+doubao-tts create --prompt "持续的雨声。旁白说：今天学习红色。随后一声轻轻的翻书声。" --out ".\audio\scene.mp3" --json
+doubao-tts clone --audio ".\samples\voice.wav" --speaker-id "<SPEAKER_ID>" --language cn --demo-text "这是试听文本。" --out ".\audio\clone-demo.mp3" --json
+doubao-tts design --speaker-id "<SPEAKER_ID>" --text "夜色渐浓。" --prompt "女性，语速中等，语调温和" --out ".\audio\design-demo.mp3" --json
+doubao-tts voice-status --speaker-id "<SPEAKER_ID>" --json
+```
+
+复刻或设计成功后，先确认状态和试听，再用返回的音色 ID 与 `seed-icl-2.0` 正式合成。后付费复刻使用 `--speaker-id custom_speaker_id --custom-speaker-id <自定义名称>`；首次合成可能涉及音色槽位费用，应先确认所选服务的计费规则。
+
+批量示例使用本地别名 `narrator`，先注册别名或将清单改为自己的 `voice_id`：
+
+```powershell
+doubao-tts voices add narrator --voice-id "<VOICE_ID>" --resource seed-tts-2.0
+doubao-tts batch --manifest ".\examples\batch.json" --output-dir ".\audio" --dry-run --json
+doubao-tts batch --manifest ".\examples\batch.json" --output-dir ".\audio" --resume --json
+```
+
+## 结果与恢复
+
+`--json` 返回结果，`duration_ms` 来自实际保存的 MP3。`synth` 和 `batch` 的 `--dry-run` 不请求生成服务，也不返回虚构的音频路径或时长。
+
+已有文件默认不覆盖。`--resume` 会校验任务输入、音频与配套记录，跳过可复用文件。生成前检查保存条件；可能已计费的断线或超时不自动重试，并返回 `may_have_been_billed: true`。批量任务遇到配置、授权或额度问题会停止后续提交，单项保存失败会保留整批完成情况。
 
 ## 测试
 
@@ -55,4 +75,4 @@ doubao-tts batch --manifest .\examples\batch.json --output-dir .\audio --resume 
 .\.venv\Scripts\python -m pytest
 ```
 
-默认不访问真实接口。需要自己验收时，在本机设置密钥和 `DOUBAO_TTS_LIVE=1`、`DOUBAO_TTS_LIVE_VOICE_ID` 后再跑测试。没有跑过的线上结果不能当成验收通过。
+默认测试使用本地模拟，不产生服务费用。在线验证需自行设置 `DOUBAO_TTS_LIVE=1`、`DOUBAO_TTS_LIVE_VOICE_ID` 和对应密钥；在线测试可能计费。

@@ -18,7 +18,6 @@ from minimax_tts.audio import commit_mp3, ensure_mp3_destination, prepare_output
 from minimax_tts.batch import run_batch, write_meta
 from minimax_tts.errors import EXIT_INTERRUPT, CliError, dumps, redact
 from minimax_tts.pairings import list_pairings
-from minimax_tts.script_rules import require_cantonese_colloquial, require_cantonese_pairing
 from minimax_tts.models import (
     VoicePreset,
     check_bitrate,
@@ -37,14 +36,6 @@ from minimax_tts.voices import add_voice, load_voices, remove_voice, resolve_voi
 PROVIDER = "minimax"
 
 
-def ensure_minimax_enabled() -> None:
-    import os
-
-    if os.environ.get("MINIMAX_TTS_ENABLED", "").strip() != "1":
-        raise CliError(
-            "CONFIG_MISSING",
-            "MiniMax 当前未启用，账号未充值。请改用 doubao-tts。确认充值后再设置 MINIMAX_TTS_ENABLED=1",
-        )
 app = typer.Typer(add_completion=False, no_args_is_help=True, name="minimax-tts")
 voices_app = typer.Typer(add_completion=False, no_args_is_help=True, help="管理本地音色别名")
 app.add_typer(voices_app, name="voices")
@@ -270,7 +261,6 @@ def synth(
     settings = _load(json_output)
 
     def action() -> tuple[dict[str, Any], int]:
-        ensure_minimax_enabled()
         spoken = _read_text(text, text_file, use_stdin)
         resolved = resolve_voice(
             settings,
@@ -285,9 +275,6 @@ def synth(
             sample_rate=sample_rate,
             bitrate=bitrate,
         )
-        require_cantonese_pairing(resolved.voice_id, resolved.language_boost)
-        if resolved.language_boost == "Chinese,Yue":
-            require_cantonese_colloquial(spoken)
         destination = ensure_mp3_destination(out if out.is_absolute() else Path.cwd() / out).resolve()
         chosen_id = task_id or destination.stem
         digest = fingerprint(resolved, spoken)
@@ -373,7 +360,6 @@ def batch_command(
     settings = _load(json_output)
 
     def action() -> tuple[dict[str, Any], int]:
-        ensure_minimax_enabled()
         _bounds(retries, timeout)
         client = None if dry_run else make_client(timeout)
         try:
@@ -434,7 +420,7 @@ def voices_pairings(
     language: str | None = typer.Option(None, "--language", help="zh、en 或 yue"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """列出系统音色搭配。粤语必须使用繁体字粤语口语。"""
+    """列出系统音色搭配和可选的粤语建议。"""
     settings = _load(json_output)
 
     def action() -> tuple[dict[str, Any], int]:

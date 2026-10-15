@@ -4,16 +4,16 @@ from typing import Any
 
 CANTONESE_RULE = {
     "available": False,
-    "provider": "minimax",
-    "command": "minimax-tts",
-    "language_boost": "Chinese,Yue",
-    "text_rule": "粤语配音必须使用 minimax-tts，台词必须是繁体字粤语口语",
-    "example": "今日我哋一齊學英語！",
+    "provider": None,
+    "command": None,
+    "language_boost": None,
+    "text_rule": "当前推荐列表未收录粤语音色，按音色实际支持的语言选择。",
+    "example": None,
 }
 
-# 配音常用的 seed-tts-2.0 系统音色。不是控制台全量，也不包含粤语搭配。
+# 常用的 seed-tts-2.0 系统音色推荐，不代表控制台全部音色。
 _ROWS: tuple[tuple[str, str, str, str, str], ...] = (
-    ("zh", "普通话旁白", "Vivi 2.0", "zh_female_vv_uranus_bigtts", "本机已合成通过"),
+    ("zh", "普通话旁白", "Vivi 2.0", "zh_female_vv_uranus_bigtts", ""),
     ("zh", "普通话旁白", "小何 2.0", "zh_female_xiaohe_uranus_bigtts", ""),
     ("zh", "普通话旁白", "云舟 2.0", "zh_male_m191_uranus_bigtts", ""),
     ("zh", "普通话旁白", "小天 2.0", "zh_male_taocheng_uranus_bigtts", ""),
@@ -56,7 +56,7 @@ def list_pairings(language: str | None = None) -> dict[str, Any]:
                     "name": name,
                     "voice_id": voice_id,
                     "resource_id": "seed-tts-2.0",
-                    "text_rule": "普通话用简体中文，英语用英文。不要用来配粤语。",
+                    "text_rule": "按音色实际支持的语言选择合成文本。",
                     "note": note,
                 }
             )

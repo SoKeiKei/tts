@@ -14,7 +14,6 @@ from minimax_tts.api import synthesize
 from minimax_tts.audio import atomic_write, commit_mp3, ensure_mp3_destination, measure_duration_ms, prepare_output, sha256_bytes
 from minimax_tts.errors import CliError
 from minimax_tts.models import Manifest, ManifestTask, ResolvedVoice, fingerprint, require_text
-from minimax_tts.script_rules import require_cantonese_colloquial, require_cantonese_pairing
 from minimax_tts.settings import Settings, require_api_key
 from minimax_tts.voices import resolve_voice
 
@@ -107,9 +106,6 @@ def resolve_task(settings: Settings, task: ManifestTask, defaults: Any, manifest
         sample_rate=task.sample_rate if task.sample_rate is not None else defaults.sample_rate,
         bitrate=task.bitrate if task.bitrate is not None else defaults.bitrate,
     )
-    require_cantonese_pairing(voice.voice_id, voice.language_boost)
-    if voice.language_boost == "Chinese,Yue":
-        require_cantonese_colloquial(text)
     destination = safe_output(output_dir, task.output)
     return text, destination, voice, fingerprint(voice, text)
 

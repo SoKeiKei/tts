@@ -12,7 +12,7 @@ from tests.conftest import add_narrator, install_transport, minimal_mp3, ndjson_
 def test_version_and_help(runner) -> None:
     version = runner.invoke(app, ["--version"])
     assert version.exit_code == 0
-    assert version.stdout.strip() == "0.1.1"
+    assert version.stdout.strip() == "0.1.2"
     help_result = runner.invoke(app, ["--help"])
     assert help_result.exit_code == 0
     assert "synth" in help_result.stdout
@@ -215,26 +215,43 @@ def test_voices_roundtrip(runner) -> None:
     assert missing.exit_code == 2
 
 
-def test_pairings_exclude_cantonese(runner) -> None:
+def test_pairings_describe_recommendation_scope(runner) -> None:
     listed = json.loads(runner.invoke(app, ["voices", "pairings", "--json"]).stdout)
     assert listed["cantonese_rule"]["available"] is False
-    assert listed["cantonese_rule"]["command"] == "minimax-tts"
-    assert "繁体字粤语口语" in listed["cantonese_rule"]["text_rule"]
+    assert listed["cantonese_rule"]["provider"] is None
+    assert listed["cantonese_rule"]["command"] is None
+    assert "当前推荐列表未收录粤语音色" in listed["cantonese_rule"]["text_rule"]
+    assert "按音色实际支持的语言选择" in listed["cantonese_rule"]["text_rule"]
+    assert "minimax" not in json.dumps(listed, ensure_ascii=False).lower()
     assert all(item["language"] != "yue" for item in listed["pairings"])
     yue = json.loads(runner.invoke(app, ["voices", "pairings", "--language", "yue", "--json"]).stdout)
     assert yue["pairings"] == []
+    ordinary_yue = runner.invoke(app, ["voices", "pairings", "--language", "yue"])
+    assert "暂无匹配推荐" in ordinary_yue.stdout
+    assert "不提供粤语配音" not in ordinary_yue.stdout
     mandarin = runner.invoke(app, ["voices", "pairings", "--language", "zh"])
     assert "zh_female_vv_uranus_bigtts" in mandarin.stdout
     assert "seed-tts-2.0" in mandarin.stdout
 
 
-def test_cantonese_text_is_rejected(runner, tmp_path: Path) -> None:
+def test_cantonese_text_is_sent_unchanged_to_mock_provider(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY", "mock-key-123456")
+    add_narrator(runner)
+    spoken = "今日我哋一齊學英語！"
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        sent.append(body["req_params"]["text"])
+        return httpx.Response(200, content=ndjson_success(minimal_mp3()))
+
+    install_transport(monkeypatch, handler)
     result = runner.invoke(
         app,
-        ["synth", "--text", "今日我哋一齊學英語！", "--voice-id", "zh_female_vv_uranus_bigtts", "--out", str(tmp_path / "a.mp3"), "--json"],
+        ["synth", "--text", spoken, "--voice", "narrator", "--out", str(tmp_path / "a.mp3"), "--json"],
     )
     payload = json.loads(result.stdout)
-    assert result.exit_code == 2
-    assert payload["error"]["code"] == "INVALID_ARGUMENT"
-    assert "minimax-tts" in payload["error"]["message"]
-    assert not (tmp_path / "a.mp3").exists()
+    assert result.exit_code == 0, result.stdout
+    assert payload["ok"] is True
+    assert sent == [spoken]
+    assert (tmp_path / "a.mp3").is_file()

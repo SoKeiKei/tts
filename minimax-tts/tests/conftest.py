@@ -19,11 +19,10 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "MINIMAX_TTS_API_BASE",
         "MINIMAX_TTS_DEFAULT_MODEL",
         "MINIMAX_TTS_ALLOW_TEST_BASE",
+        "MINIMAX_TTS_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("minimax_tts.api._sleep", lambda _seconds: None)
-    monkeypatch.setenv("MINIMAX_TTS_ENABLED", "1")
-    monkeypatch.setenv("MINIMAX_TTS_ENABLED", "1")
 
 
 @pytest.fixture

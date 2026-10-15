@@ -53,6 +53,30 @@ def test_batch_resume_skips_second_call(runner, monkeypatch, tmp_path: Path) -> 
     assert all(item["reused"] is True for item in payload["results"])
 
 
+def test_batch_sends_cantonese_text_unchanged_to_mock_provider(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY", "mock-key-123456")
+    add_narrator(runner)
+    spoken = "今日我哋一齊學英語！"
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        sent.append(body["req_params"]["text"])
+        return httpx.Response(200, content=ndjson_success(minimal_mp3()))
+
+    install_transport(monkeypatch, handler)
+    manifest = tmp_path / "batch.json"
+    _manifest(manifest, [{"id": "yue-line", "text": spoken, "output": "yue-line.mp3"}])
+    result = runner.invoke(
+        app,
+        ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path / "out"), "--json"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["succeeded"] == 1
+    assert sent == [spoken]
+
+
 def test_resume_regenerates_when_text_changes(runner, monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DOUBAO_TTS_API_KEY", "k-12345678")
     add_narrator(runner)
@@ -237,5 +261,5 @@ def test_no_other_provider_import() -> None:
 
     import doubao_tts
 
-    assert doubao_tts.__version__ == "0.1.1"
+    assert doubao_tts.__version__ == "0.1.2"
     assert not any(name.startswith("minimax") for name in sys.modules)

@@ -18,7 +18,6 @@ from doubao_tts.batch import run_batch, write_meta
 from doubao_tts.errors import EXIT_INTERRUPT, CliError, dumps, redact
 from doubao_tts.models import fingerprint, require_text
 from doubao_tts.pairings import list_pairings
-from doubao_tts.script_rules import reject_cantonese_text
 from doubao_tts.settings import Settings, load_settings, mask_secret, require_api_key
 from doubao_tts.studio import clone_voice, create_audio, design_voice, get_voice
 from doubao_tts.voices import add_voice, load_voices, remove_voice, resolve_voice, show_voice
@@ -77,7 +76,7 @@ def _emit(payload: dict[str, Any], json_output: bool, settings: Settings) -> Non
             extra = item.get("resource_id") or item.get("language_boost") or ""
             typer.echo(f"{item['language']}\t{item['scene']}\t{item['name']}\t{item['voice_id']}\t{extra}")
         if not payload["pairings"]:
-            typer.echo("此工具不提供粤语配音。")
+            typer.echo("暂无匹配推荐。")
         return
     typer.echo(dumps(payload))
 
@@ -279,7 +278,6 @@ def synth(
 
     def action() -> tuple[dict[str, Any], int]:
         spoken = _read_text(text, text_file, use_stdin)
-        reject_cantonese_text(spoken)
         resolved = resolve_voice(
             settings,
             alias=voice,
@@ -686,7 +684,7 @@ def voices_pairings(
     language: str | None = typer.Option(None, "--language", help="zh、en 或 yue"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    """列出配音可用的声音搭配。粤语不在此列表。"""
+    """列出推荐的声音搭配。"""
     settings = _load(json_output)
 
     def action() -> tuple[dict[str, Any], int]:

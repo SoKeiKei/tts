@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from minimax_tts.script_rules import CANTONESE_EXAMPLE, CANTONESE_TEXT_RULE
+from minimax_tts.script_rules import CANTONESE_EXAMPLE, CANTONESE_TEXT_GUIDANCE
 
 CANTONESE_RULE = {
     "available": True,
     "provider": "minimax",
     "model": "speech-2.8-hd",
     "language_boost": "Chinese,Yue",
-    "text_rule": CANTONESE_TEXT_RULE,
+    "text_rule": CANTONESE_TEXT_GUIDANCE,
     "example": CANTONESE_EXAMPLE,
 }
 
@@ -94,7 +94,7 @@ def list_pairings(language: str | None = None) -> dict[str, Any]:
             rows.append(_row("en", "英语", name, voice_id, "English", "英语台词用英文"))
     if chosen in {None, "yue"}:
         for voice_id, name in _CANTONESE:
-            rows.append(_row("yue", "粤语配音", name, voice_id, "Chinese,Yue", CANTONESE_TEXT_RULE))
+            rows.append(_row("yue", "粤语配音", name, voice_id, "Chinese,Yue", CANTONESE_TEXT_GUIDANCE))
     return {
         "ok": True,
         "provider": "minimax",
