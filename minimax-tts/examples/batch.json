@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "defaults": {
+    "voice": "narrator",
+    "model": "speech-2.8-hd",
+    "speed": 1.0,
+    "language_boost": "auto"
+  },
+  "tasks": [
+    {
+      "id": "ep01-sc01-line01",
+      "text": "Hello! Today we will learn the colors red, blue, and yellow.",
+      "output": "ep01-sc01-line01.mp3"
+    },
+    {
+      "id": "ep01-sc02-line01",
+      "text": "今日我哋一齊學英語！",
+      "output": "ep01-sc02-line01.mp3",
+      "voice": "yue_host",
+      "language_boost": "Chinese,Yue"
+    }
+  ]
+}

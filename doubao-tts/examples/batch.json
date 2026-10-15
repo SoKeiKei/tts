@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "defaults": {"voice": "narrator", "resource": "seed-tts-2.0", "speed": 0},
+  "tasks": [
+    {"id": "ep01-sc01-line01", "text": "今天，我们学习苹果这个单词。", "output": "ep01-sc01-line01.mp3"},
+    {"id": "ep01-sc01-line02", "text": "Apple!", "output": "ep01-sc01-line02.mp3"}
+  ]
+}

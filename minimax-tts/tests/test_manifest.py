@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+
+from minimax_tts.cli import app
+from tests.conftest import add_narrator, install_transport, minimal_mp3, success_payload
+
+
+def _manifest(path: Path, tasks: list[dict], defaults: dict | None = None) -> None:
+    path.write_text(
+        json.dumps(
+            {"version": 1, "defaults": defaults or {"voice": "narrator", "model": "speech-2.8-hd"}, "tasks": tasks},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_manifest_validation(runner, tmp_path: Path) -> None:
+    add_narrator(runner)
+    add_narrator(runner, language="Chinese,Yue", name="yue_host")
+    manifest = tmp_path / "batch.json"
+    _manifest(manifest, [{"id": "dup", "text": "a", "output": "a.mp3"}, {"id": "dup", "text": "b", "output": "b.mp3"}])
+    duplicate = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path / "out"), "--json"])
+    assert duplicate.exit_code == 2
+    _manifest(manifest, [{"id": "bad", "text": "a", "output": "../x.mp3"}])
+    travel = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path / "out"), "--json"])
+    assert travel.exit_code == 2
+    assert not (tmp_path / "x.mp3").exists()
+
+
+def test_resume_and_emotion_change(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAX_TTS_API_KEY", "minimax-live-key-xyz")
+    add_narrator(runner)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = json.loads(request.content.decode("utf-8"))
+        assert body["text"]
+        return httpx.Response(200, json=success_payload(minimal_mp3()))
+
+    install_transport(monkeypatch, handler)
+    manifest = tmp_path / "batch.json"
+    audio = tmp_path / "音频 输出"
+    tasks = [{"id": "line-1", "text": "Hello! Today we learn colors.", "output": "line-1.mp3"}]
+    _manifest(manifest, tasks)
+    first = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(audio), "--json"])
+    assert first.exit_code == 0, first.stdout
+    second = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(audio), "--resume", "--json"])
+    assert second.exit_code == 0, second.stdout
+    assert json.loads(second.stdout)["skipped"] == 1
+    assert calls["n"] == 1
+    tasks[0]["emotion"] = "happy"
+    _manifest(manifest, tasks)
+    third = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(audio), "--resume", "--json"])
+    payload = json.loads(third.stdout)
+    assert third.exit_code == 0, third.stdout
+    assert calls["n"] == 2
+    assert payload["results"][0]["status"] == "regenerated"
+
+
+def test_existing_file_is_not_overwritten(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAX_TTS_API_KEY", "minimax-live-key-xyz")
+    add_narrator(runner)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json=success_payload(minimal_mp3()))
+
+    install_transport(monkeypatch, handler)
+    audio = tmp_path / "out"
+    audio.mkdir()
+    (audio / "keep.mp3").write_bytes(b"foreign")
+    manifest = tmp_path / "batch.json"
+    _manifest(
+        manifest,
+        [
+            {"id": "new-1", "text": "new", "output": "new.mp3"},
+            {"id": "keep-1", "text": "old", "output": "keep.mp3"},
+        ],
+    )
+    result = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(audio), "--json"])
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 6
+    assert payload["succeeded"] == 1
+    assert payload["results"][1]["error"]["code"] == "OUTPUT_EXISTS"
+    assert (audio / "keep.mp3").read_bytes() == b"foreign"
+    assert calls["n"] == 1
+
+
+def test_pairings_list_cantonese_rule(runner) -> None:
+    payload = json.loads(runner.invoke(app, ["voices", "pairings", "--language", "yue", "--json"]).stdout)
+    assert payload["cantonese_rule"]["language_boost"] == "Chinese,Yue"
+    assert "繁体字粤语口语" in payload["cantonese_rule"]["text_rule"]
+    ids = {item["voice_id"] for item in payload["pairings"]}
+    assert "Cantonese_GentleLady" in ids
+    assert "Cantonese_ProfessionalHost (F)" in ids
+    assert all(item["language_boost"] == "Chinese,Yue" for item in payload["pairings"])
+
+
+def test_simplified_cantonese_is_rejected(runner, tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "synth",
+            "--text",
+            "今日我哋一齐学英语！",
+            "--voice-id",
+            "Cantonese_GentleLady",
+            "--language-boost",
+            "Chinese,Yue",
+            "--out",
+            str(tmp_path / "a.mp3"),
+            "--json",
+        ],
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 2
+    assert "繁体字粤语口语" in payload["error"]["message"]
+    assert not (tmp_path / "a.mp3").exists()
+
+
+def test_mandarin_text_cannot_use_cantonese_boost(runner, tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "synth",
+            "--text",
+            "今天我们学习英语。",
+            "--voice-id",
+            "Chinese (Mandarin)_Lyrical_Voice",
+            "--language-boost",
+            "Chinese,Yue",
+            "--out",
+            str(tmp_path / "a.mp3"),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "繁体字粤语口语" in json.loads(result.stdout)["error"]["message"]
+
+
+def test_minimax_is_disabled_unless_explicitly_enabled(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("MINIMAX_TTS_ENABLED", raising=False)
+    monkeypatch.setenv("MINIMAX_TTS_API_KEY", "minimax-live-key-xyz")
+    result = runner.invoke(
+        app,
+        ["synth", "--text", "测试。", "--voice-id", "v", "--out", str(tmp_path / "a.mp3"), "--json"],
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 3
+    assert payload["error"]["code"] == "CONFIG_MISSING"
+    assert "doubao-tts" in payload["error"]["message"]
+    assert not (tmp_path / "a.mp3").exists()
+
+
+def test_no_doubao_import() -> None:
+    import sys
+
+    import minimax_tts
+
+    assert minimax_tts.__version__ == "0.1.0"
+    assert not any(name.startswith("doubao") for name in sys.modules)
