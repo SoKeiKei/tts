@@ -45,6 +45,8 @@ minimax-tts batch --manifest .\examples\batch.json --output-dir .\audio --resume
 
 `--json` 时 stdout 只有一个 JSON 对象。`duration_ms` 来自落盘后的 MP3，不是按字数估算。`--dry-run` 不请求 MiniMax。
 
+为避免重复计费，请求可能已经送达后发生的断线或超时不会自动重试，错误结果会带上 `may_have_been_billed: true`。尚未建立连接的失败和明确的限流可以有限重试。批量任务遇到配置、授权或余额问题会停止后续提交；单项保存失败会保留整批的完成情况。
+
 ## 测试
 
 ```powershell

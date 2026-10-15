@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from doubao_tts import __version__
 from doubao_tts.api import synthesize
-from doubao_tts.audio import atomic_write, commit_mp3, ensure_mp3_destination, measure_duration_ms, sha256_bytes
+from doubao_tts.audio import atomic_write, commit_mp3, ensure_mp3_destination, measure_duration_ms, prepare_output, sha256_bytes
 from doubao_tts.errors import CliError
 from doubao_tts.models import Manifest, ManifestTask, ResolvedVoice, fingerprint, require_text
 from doubao_tts.script_rules import reject_cantonese_text
@@ -41,6 +41,7 @@ def safe_output(output_dir: Path, relative: str) -> Path:
             target = current.resolve()
             if not _inside(base, target):
                 raise CliError("INVALID_ARGUMENT", "output path must stay inside the output directory")
+    ensure_mp3_destination(base / raw)
     destination = (base / raw).resolve()
     if not _inside(base, destination):
         raise CliError("INVALID_ARGUMENT", "output path must stay inside the output directory")
@@ -137,7 +138,7 @@ def _read_meta(path: Path, task_id: str) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(meta.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(data, dict):
         return None
@@ -201,6 +202,7 @@ def run_batch(
     succeeded = 0
     failed = 0
     skipped = 0
+    stop_code: str | None = None
     for task, text, destination, voice, digest in planned:
         if dry_run:
             results.append(
@@ -215,6 +217,17 @@ def run_batch(
                     "resource_id": voice.resource_id,
                 }
             )
+            continue
+        if stop_code is not None:
+            error = CliError(
+                stop_code,
+                "batch stopped after a configuration, authorization, or quota failure; this task was not submitted",
+                task_id=task.id,
+            )
+            body = error.payload(PROVIDER)
+            body["status"] = "stopped"
+            results.append(body)
+            failed += 1
             continue
         item, kind = _run_one(
             settings,
@@ -234,6 +247,9 @@ def run_batch(
             skipped += 1
         elif kind == "failed":
             failed += 1
+            error_code = item.get("error", {}).get("code")
+            if error_code in {"CONFIG_MISSING", "AUTH_OR_RESOURCE", "QUOTA_EXHAUSTED"}:
+                stop_code = error_code
         else:
             succeeded += 1
     payload = {
@@ -291,8 +307,11 @@ def _run_one(
             body["status"] = "failed"
             return body, "failed"
     assert client is not None
-    require_api_key(settings)
+    produced = None
     try:
+        require_api_key(settings)
+        prepare_output(destination, overwrite=overwrite or existed)
+        prepare_output(meta_path_for(destination), overwrite=True)
         produced = synthesize(
             settings,
             text=text,
@@ -301,7 +320,7 @@ def _run_one(
             retries=retries,
             timeout=timeout,
         )
-        duration = commit_mp3(destination, produced.audio)
+        duration = commit_mp3(destination, produced.audio, overwrite=overwrite or existed)
         meta = {
             "version": 1,
             "provider": PROVIDER,
@@ -325,7 +344,11 @@ def _run_one(
             "usage": {"text_words": produced.text_words},
         }
         write_meta(destination, meta)
-    except CliError as exc:
+    except (CliError, OSError) as error:
+        exc = error if isinstance(error, CliError) else CliError("OUTPUT_IO", "failed to save output")
+        if produced is not None:
+            exc.may_have_been_billed = True
+            exc.with_context(request_id=produced.request_id, log_id=produced.log_id)
         exc.task_id = task_id
         body = exc.payload(PROVIDER)
         body["status"] = "failed"

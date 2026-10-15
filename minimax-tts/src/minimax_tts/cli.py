@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import sys
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,7 +14,7 @@ import typer
 
 from minimax_tts import __version__
 from minimax_tts.api import synthesize
-from minimax_tts.audio import commit_mp3, ensure_mp3_destination, sha256_bytes
+from minimax_tts.audio import commit_mp3, ensure_mp3_destination, prepare_output, sha256_bytes
 from minimax_tts.batch import run_batch, write_meta
 from minimax_tts.errors import EXIT_INTERRUPT, CliError, dumps, redact
 from minimax_tts.pairings import list_pairings
@@ -122,6 +126,21 @@ def _run(json_output: bool, settings: Settings, action: Any) -> None:
         raise typer.Exit(code)
 
 
+@contextmanager
+def _saving_result(request_id: str, trace_id: str | None, *, task_id: str | None = None) -> Iterator[None]:
+    try:
+        yield
+    except (CliError, OSError) as error:
+        exc = error if isinstance(error, CliError) else CliError("OUTPUT_IO", "failed to save output")
+        exc.may_have_been_billed = True
+        exc.request_id = request_id
+        exc.provider_trace_id = trace_id
+        exc.task_id = task_id
+        if exc is error:
+            raise
+        raise exc from error
+
+
 def make_client(timeout: float) -> httpx.Client:
     bounded = max(timeout, 1.0)
     return httpx.Client(
@@ -151,14 +170,25 @@ def _bounds(retries: int, timeout: float) -> None:
 
 
 def _writable(path: Path) -> bool:
+    probe: Path | None = None
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".minimax-tts-write-probe"
-        probe.write_text("ok", encoding="utf-8")
+        candidate = path / f".minimax-tts-write-probe-{uuid.uuid4().hex}"
+        descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        probe = candidate
+        try:
+            os.write(descriptor, b"ok")
+        finally:
+            os.close(descriptor)
         probe.unlink()
+        return True
     except OSError:
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False
-    return True
 
 
 def _print_version(value: bool) -> None:
@@ -282,27 +312,30 @@ def synth(
             )
         if destination.exists() and not overwrite:
             raise CliError("OUTPUT_EXISTS", "output file already exists", task_id=chosen_id)
+        prepare_output(destination, overwrite=overwrite)
+        prepare_output(destination.with_suffix(".meta.json"), overwrite=True)
         require_api_key(settings)
         with make_client(timeout) as client:
             produced = synthesize(settings, text=spoken, voice=resolved, client=client, retries=retries, timeout=timeout)
-        duration = commit_mp3(destination, produced.audio)
-        write_meta(
-            destination,
-            {
-                "version": 1,
-                "provider": PROVIDER,
-                "tool_version": __version__,
-                "task_id": chosen_id,
-                "input_sha256": digest,
-                "audio_sha256": sha256_bytes(destination.read_bytes()),
-                "duration_ms": duration,
-                "request_id": produced.request_id,
-                "provider_trace_id": produced.trace_id,
-                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "params": resolved.model_dump(),
-                "usage": {"usage_characters": produced.usage_characters},
-            },
-        )
+        with _saving_result(produced.request_id, produced.trace_id, task_id=chosen_id):
+            duration = commit_mp3(destination, produced.audio, overwrite=overwrite)
+            write_meta(
+                destination,
+                {
+                    "version": 1,
+                    "provider": PROVIDER,
+                    "tool_version": __version__,
+                    "task_id": chosen_id,
+                    "input_sha256": digest,
+                    "audio_sha256": sha256_bytes(destination.read_bytes()),
+                    "duration_ms": duration,
+                    "request_id": produced.request_id,
+                    "provider_trace_id": produced.trace_id,
+                    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "params": resolved.model_dump(),
+                    "usage": {"usage_characters": produced.usage_characters},
+                },
+            )
         return (
             {
                 "ok": True,

@@ -189,7 +189,11 @@ def assemble_audio(frames: Iterable[dict[str, Any]], *, secrets: list[str]) -> t
     audio = b"".join(parts)
     if not audio:
         raise CliError("INVALID_AUDIO", "provider returned no audio", may_have_been_billed=True)
-    validate_mp3_bytes(audio)
+    try:
+        validate_mp3_bytes(audio)
+    except CliError as exc:
+        exc.may_have_been_billed = True
+        raise
     return audio, text_words
 
 
@@ -213,6 +217,7 @@ def synthesize(
     secret_values = [item for item in secret_values if item]
     attempts = max(retries, 0) + 1
     last: CliError | None = None
+    billed = False
     for attempt in range(attempts):
         current_id = request_id or str(uuid.uuid4())
         try:
@@ -227,8 +232,10 @@ def synthesize(
             )
         except CliError as exc:
             exc.request_id = exc.request_id or current_id
+            billed = billed or exc.may_have_been_billed
+            exc.may_have_been_billed = billed
             last = exc
-            if not exc.retryable or attempt + 1 >= attempts:
+            if not exc.retryable or exc.may_have_been_billed or attempt + 1 >= attempts:
                 raise
             delay = exc.retry_after if exc.retry_after is not None else _backoff(attempt)
             _sleep(delay)
@@ -272,10 +279,8 @@ def _once(
         "X-Control-Require-Usage-Tokens-Return": "text_words",
     }
     deadline = time.monotonic() + timeout
-    sent = False
     try:
         with client.stream("POST", url, headers=headers, json=body, timeout=httpx.Timeout(connect=min(10.0, timeout), read=min(30.0, timeout), write=min(30.0, timeout), pool=min(10.0, timeout))) as response:
-            sent = True
             log_id = response.headers.get("x-tt-logid")
             status_error = map_http_status(response.status_code, _retry_after(response.headers))
             if status_error is not None:
@@ -295,15 +300,7 @@ def _once(
                 chunks.append(chunk)
     except CliError:
         raise
-    except httpx.TimeoutException as exc:
-        raise CliError(
-            "NETWORK_TEMPORARY",
-            "request timed out",
-            retryable=True,
-            may_have_been_billed=sent,
-            request_id=request_id,
-        ) from exc
-    except httpx.ConnectError as exc:
+    except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
         raise CliError(
             "NETWORK_TEMPORARY",
             "connection failed",
@@ -311,15 +308,37 @@ def _once(
             may_have_been_billed=False,
             request_id=request_id,
         ) from exc
+    except httpx.TimeoutException as exc:
+        raise CliError(
+            "NETWORK_TEMPORARY",
+            "request timed out",
+            retryable=True,
+            may_have_been_billed=True,
+            request_id=request_id,
+        ) from exc
     except httpx.TransportError as exc:
         raise CliError(
             "NETWORK_TEMPORARY",
             "connection failed",
             retryable=True,
-            may_have_been_billed=sent,
+            may_have_been_billed=True,
             request_id=request_id,
         ) from exc
-    audio, text_words = assemble_audio(iter_json_objects(chunks), secrets=secrets)
+    try:
+        audio, text_words = assemble_audio(iter_json_objects(chunks), secrets=secrets)
+    except UnicodeDecodeError as exc:
+        raise CliError(
+            "INVALID_AUDIO",
+            "provider response is not valid UTF-8",
+            request_id=request_id,
+            log_id=log_id,
+            may_have_been_billed=True,
+        ) from exc
+    except CliError as exc:
+        exc.with_context(request_id=request_id, log_id=log_id)
+        if exc.code == "INVALID_AUDIO":
+            exc.may_have_been_billed = True
+        raise
     return SynthAudio(
         audio=audio,
         request_id=request_id,

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import sys
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +13,7 @@ import typer
 
 from doubao_tts import __version__
 from doubao_tts.api import synthesize
-from doubao_tts.audio import commit_mp3, ensure_mp3_destination, sha256_bytes
+from doubao_tts.audio import commit_mp3, ensure_mp3_destination, prepare_output, sha256_bytes
 from doubao_tts.batch import run_batch, write_meta
 from doubao_tts.errors import EXIT_INTERRUPT, CliError, dumps, redact
 from doubao_tts.models import fingerprint, require_text
@@ -102,6 +106,25 @@ def _run(json_output: bool, settings: Settings, action: Any) -> None:
     _emit(payload, json_output, settings)
     if code:
         raise typer.Exit(code)
+
+
+@contextmanager
+def _saving_result(
+    request_id: str,
+    log_id: str | None,
+    *,
+    task_id: str | None = None,
+    may_have_been_billed: bool = True,
+) -> Iterator[None]:
+    try:
+        yield
+    except (CliError, OSError) as error:
+        exc = error if isinstance(error, CliError) else CliError("OUTPUT_IO", "failed to save output")
+        exc.may_have_been_billed = exc.may_have_been_billed or may_have_been_billed
+        exc.with_context(request_id=request_id, log_id=log_id, task_id=task_id)
+        if exc is error:
+            raise
+        raise exc from error
 
 
 def make_client(timeout: float) -> httpx.Client:
@@ -210,12 +233,24 @@ def voices_path(settings: Settings) -> Path:
 
 
 def _writable_dir(path: Path) -> tuple[bool, str | None]:
+    probe: Path | None = None
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".doubao-tts-write-probe"
-        probe.write_text("ok", encoding="utf-8")
+        candidate = path / f".doubao-tts-write-probe-{uuid.uuid4().hex}"
+        descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        probe = candidate
+        try:
+            os.write(descriptor, b"ok")
+        finally:
+            os.close(descriptor)
         probe.unlink()
+        probe = None
     except OSError:
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False, "directory is not writable"
     return True, None
 
@@ -288,6 +323,8 @@ def synth(
             )
         if destination.exists() and not overwrite:
             raise CliError("OUTPUT_EXISTS", "output file already exists", task_id=chosen_id)
+        prepare_output(destination, overwrite=overwrite)
+        prepare_output(destination.with_suffix(".meta.json"), overwrite=True)
         require_api_key(settings)
         with make_client(timeout) as client:
             produced = synthesize(
@@ -298,36 +335,37 @@ def synth(
                 retries=retries,
                 timeout=timeout,
             )
-        duration = commit_mp3(destination, produced.audio)
-        from datetime import datetime, timezone
+        with _saving_result(produced.request_id, produced.log_id, task_id=chosen_id):
+            duration = commit_mp3(destination, produced.audio, overwrite=overwrite)
+            from datetime import datetime, timezone
 
-        from doubao_tts import __version__ as tool_version
+            from doubao_tts import __version__ as tool_version
 
-        write_meta(
-            destination,
-            {
-                "version": 1,
-                "provider": PROVIDER,
-                "tool_version": tool_version,
-                "task_id": chosen_id,
-                "input_sha256": digest,
-                "audio_sha256": sha256_bytes(destination.read_bytes()),
-                "duration_ms": duration,
-                "request_id": produced.request_id,
-                "log_id": produced.log_id,
-                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "params": {
-                    "voice_id": resolved.voice_id,
-                    "resource_id": resolved.resource_id,
-                    "speed": resolved.speed,
-                    "volume": resolved.volume,
-                    "sample_rate": resolved.sample_rate,
-                    "emotion": resolved.emotion,
-                    "format": "mp3",
+            write_meta(
+                destination,
+                {
+                    "version": 1,
+                    "provider": PROVIDER,
+                    "tool_version": tool_version,
+                    "task_id": chosen_id,
+                    "input_sha256": digest,
+                    "audio_sha256": sha256_bytes(destination.read_bytes()),
+                    "duration_ms": duration,
+                    "request_id": produced.request_id,
+                    "log_id": produced.log_id,
+                    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "params": {
+                        "voice_id": resolved.voice_id,
+                        "resource_id": resolved.resource_id,
+                        "speed": resolved.speed,
+                        "volume": resolved.volume,
+                        "sample_rate": resolved.sample_rate,
+                        "emotion": resolved.emotion,
+                        "format": "mp3",
+                    },
+                    "usage": {"text_words": produced.text_words},
                 },
-                "usage": {"text_words": produced.text_words},
-            },
-        )
+            )
         return (
             {
                 "ok": True,
@@ -424,6 +462,7 @@ def create_command(
         destination = _destination(out)
         if destination.exists() and not overwrite:
             raise CliError("OUTPUT_EXISTS", "output file already exists")
+        prepare_output(destination, overwrite=overwrite)
         require_api_key(settings)
         with _long_client(timeout) as client:
             produced = create_audio(
@@ -438,7 +477,8 @@ def create_command(
                 pitch_rate=pitch_rate,
                 timeout=timeout,
             )
-        duration = commit_mp3(destination, produced["audio"])
+        with _saving_result(produced["request_id"], produced["log_id"]):
+            duration = commit_mp3(destination, produced["audio"], overwrite=overwrite)
         return (
             {
                 "ok": True,
@@ -579,6 +619,8 @@ def _run_voice_job(
     destination = _destination(out) if out is not None else None
     if destination is not None and destination.exists() and not overwrite:
         raise CliError("OUTPUT_EXISTS", "output file already exists")
+    if destination is not None:
+        prepare_output(destination, overwrite=overwrite)
     require_api_key(settings)
     with _long_client(timeout) as client:
         produced = call(client)
@@ -596,7 +638,10 @@ def _run_voice_job(
         "resource_id_for_synth": "seed-icl-2.0",
     }
     if produced["audio"] is not None and destination is not None:
-        duration = commit_mp3(destination, produced["audio"])
+        with _saving_result(
+            produced["request_id"], produced["log_id"], may_have_been_billed=kind != "voice-status"
+        ):
+            duration = commit_mp3(destination, produced["audio"], overwrite=overwrite)
         payload["output_path"] = destination.as_posix()
         payload["duration_ms"] = duration
     return payload, 0

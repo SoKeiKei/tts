@@ -159,10 +159,68 @@ def test_minimax_is_disabled_unless_explicitly_enabled(runner, monkeypatch, tmp_
     assert not (tmp_path / "a.mp3").exists()
 
 
-def test_no_doubao_import() -> None:
+def test_bad_audio_reports_possible_charge(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAX_TTS_API_KEY", "minimax-live-key-xyz")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {"audio": "68656c6c6f", "status": 2},
+                "base_resp": {"status_code": 0, "status_msg": "success"},
+                "trace_id": "trace-bad",
+            },
+        )
+
+    install_transport(monkeypatch, handler)
+    result = runner.invoke(
+        app,
+        ["synth", "--text", "坏音频", "--voice-id", "voice-1", "--out", str(tmp_path / "a.mp3"), "--json", "--retries", "0"],
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 5
+    assert payload["error"]["code"] == "INVALID_AUDIO"
+    assert payload["may_have_been_billed"] is True
+    assert not (tmp_path / "a.mp3").exists()
+
+
+def test_quota_stops_remaining_batch_tasks(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAX_TTS_API_KEY", "minimax-live-key-xyz")
+    add_narrator(runner)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json=success_payload(b"", status_code=1008, status_msg="insufficient balance"))
+
+    install_transport(monkeypatch, handler)
+    manifest = tmp_path / "batch.json"
+    _manifest(
+        manifest,
+        [
+            {"id": "line-1", "text": "第一句", "output": "line-1.mp3"},
+            {"id": "line-2", "text": "第二句", "output": "line-2.mp3"},
+        ],
+    )
+    result = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path / "out"), "--json"])
+    payload = json.loads(result.stdout)
+    assert calls["n"] == 1
+    assert payload["results"][0]["error"]["code"] == "QUOTA_EXHAUSTED"
+    assert payload["results"][1]["status"] == "stopped"
+
+
+def test_doctor_does_not_remove_existing_probe_name(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAX_TTS_API_KEY", "minimax-live-key-xyz")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    keep = cfg / ".minimax-tts-write-probe"
+    keep.write_text("keep-me", encoding="utf-8")
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout
+    assert keep.read_text(encoding="utf-8") == "keep-me"
     import sys
 
     import minimax_tts
 
-    assert minimax_tts.__version__ == "0.1.0"
+    assert minimax_tts.__version__ == "0.1.1"
     assert not any(name.startswith("doubao") for name in sys.modules)

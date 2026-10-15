@@ -105,7 +105,12 @@ def decode_audio(payload: dict[str, Any], *, secrets: list[str]) -> tuple[bytes,
         ) from exc
     if not audio:
         raise CliError("INVALID_AUDIO", "provider returned no audio", provider_trace_id=trace_id, may_have_been_billed=True)
-    validate_mp3_bytes(audio)
+    try:
+        validate_mp3_bytes(audio)
+    except CliError as exc:
+        exc.may_have_been_billed = True
+        exc.provider_trace_id = trace_id
+        raise
     extra = payload.get("extra_info") if isinstance(payload.get("extra_info"), dict) else {}
     usage = extra.get("usage_characters")
     usage_characters = usage if isinstance(usage, int) and not isinstance(usage, bool) else None
@@ -150,14 +155,17 @@ def synthesize(
     secrets = [settings.api_key] if settings.api_key else []
     attempts = max(retries, 0) + 1
     last: CliError | None = None
+    billed = False
     for attempt in range(attempts):
         current_id = request_id or str(uuid.uuid4())
         try:
             return _once(settings, text=text, voice=voice, client=client, timeout=timeout, request_id=current_id, secrets=secrets)
         except CliError as exc:
             exc.request_id = exc.request_id or current_id
+            billed = billed or exc.may_have_been_billed
+            exc.may_have_been_billed = billed
             last = exc
-            if not exc.retryable or attempt + 1 >= attempts:
+            if not exc.retryable or exc.may_have_been_billed or attempt + 1 >= attempts:
                 raise
             _sleep(exc.retry_after if exc.retry_after is not None else _backoff(attempt))
     assert last is not None
@@ -178,7 +186,6 @@ def _once(
         raise CliError("CONFIG_MISSING", "API key is missing", request_id=request_id)
     url = settings.base_url.rstrip("/") + ENDPOINT_PATH
     headers = {"Authorization": f"Bearer {settings.api_key}"}
-    sent = False
     try:
         response = client.post(
             url,
@@ -186,20 +193,19 @@ def _once(
             json=build_body(text, voice),
             timeout=httpx.Timeout(connect=min(10.0, timeout), read=timeout, write=min(30.0, timeout), pool=min(10.0, timeout)),
         )
-        sent = True
+    except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
+        raise CliError("NETWORK_TEMPORARY", "connection failed", retryable=True, may_have_been_billed=False, request_id=request_id) from exc
     except httpx.TimeoutException as exc:
         raise CliError("NETWORK_TEMPORARY", "request timed out", retryable=True, may_have_been_billed=True, request_id=request_id) from exc
-    except httpx.ConnectError as exc:
-        raise CliError("NETWORK_TEMPORARY", "connection failed", retryable=True, may_have_been_billed=False, request_id=request_id) from exc
     except httpx.TransportError as exc:
-        raise CliError("NETWORK_TEMPORARY", "connection failed", retryable=True, may_have_been_billed=sent, request_id=request_id) from exc
+        raise CliError("NETWORK_TEMPORARY", "connection failed", retryable=True, may_have_been_billed=True, request_id=request_id) from exc
     status_error = map_http_status(response.status_code, _retry_after(response.headers))
     if status_error is not None:
         status_error.request_id = request_id
         raise status_error
     try:
         payload = response.json()
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise CliError("INVALID_AUDIO", "provider response is not JSON", request_id=request_id, may_have_been_billed=True) from exc
     if not isinstance(payload, dict):
         raise CliError("INVALID_AUDIO", "provider response is not JSON", request_id=request_id, may_have_been_billed=True)

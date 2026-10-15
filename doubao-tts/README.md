@@ -47,6 +47,8 @@ doubao-tts batch --manifest .\examples\batch.json --output-dir .\audio --resume 
 
 已有文件默认不覆盖。批量任务在输入哈希、音频哈希和 meta 都对得上时，`--resume` 会跳过，避免重复计费。
 
+为避免重复计费，请求可能已经送达后发生的断线或超时不会自动重试，错误结果会带上 `may_have_been_billed: true`。尚未建立连接的失败和明确的限流可以有限重试。批量任务遇到配置、授权或余额问题会停止后续提交；单项保存失败会保留整批的完成情况。
+
 ## 测试
 
 ```powershell

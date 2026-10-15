@@ -14,7 +14,7 @@ from tests.conftest import add_narrator, install_transport, minimal_mp3, success
 def test_version_help_and_doctor(runner, monkeypatch) -> None:
     version = runner.invoke(app, ["--version"])
     assert version.exit_code == 0
-    assert "0.1.0" in version.stdout
+    assert version.stdout.strip() == "0.1.1"
     help_result = runner.invoke(app, ["--help"])
     assert "synth" in help_result.stdout
     assert "doubao" not in help_result.stdout.lower()

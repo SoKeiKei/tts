@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from minimax_tts import __version__
 from minimax_tts.api import synthesize
-from minimax_tts.audio import atomic_write, commit_mp3, ensure_mp3_destination, measure_duration_ms, sha256_bytes
+from minimax_tts.audio import atomic_write, commit_mp3, ensure_mp3_destination, measure_duration_ms, prepare_output, sha256_bytes
 from minimax_tts.errors import CliError
 from minimax_tts.models import Manifest, ManifestTask, ResolvedVoice, fingerprint, require_text
 from minimax_tts.script_rules import require_cantonese_colloquial, require_cantonese_pairing
@@ -41,6 +41,7 @@ def safe_output(output_dir: Path, relative: str) -> Path:
             target = current.resolve()
             if not _inside(base, target):
                 raise CliError("INVALID_ARGUMENT", "output path must stay inside the output directory")
+    ensure_mp3_destination(base / raw)
     destination = (base / raw).resolve()
     if not _inside(base, destination):
         raise CliError("INVALID_ARGUMENT", "output path must stay inside the output directory")
@@ -119,7 +120,7 @@ def _read_meta(path: Path, task_id: str) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(meta.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(data, dict):
         return None
@@ -178,6 +179,7 @@ def run_batch(
             raise CliError("OUTPUT_IO", "output directory is not writable") from exc
     results: list[dict[str, Any]] = []
     succeeded = failed = skipped = 0
+    stop_code: str | None = None
     for task, text, destination, voice, digest in planned:
         if dry_run:
             results.append(
@@ -193,6 +195,17 @@ def run_batch(
                     "language_boost": voice.language_boost,
                 }
             )
+            continue
+        if stop_code is not None:
+            error = CliError(
+                stop_code,
+                "batch stopped after a configuration, authorization, or quota failure; this task was not submitted",
+                task_id=task.id,
+            )
+            body = error.payload(PROVIDER)
+            body["status"] = "stopped"
+            results.append(body)
+            failed += 1
             continue
         item, kind = _run_one(
             settings,
@@ -212,6 +225,9 @@ def run_batch(
             skipped += 1
         elif kind == "failed":
             failed += 1
+            error_code = item.get("error", {}).get("code")
+            if error_code in {"CONFIG_MISSING", "AUTH_OR_RESOURCE", "QUOTA_EXHAUSTED"}:
+                stop_code = error_code
         else:
             succeeded += 1
     payload: dict[str, Any] = {
@@ -267,10 +283,13 @@ def _run_one(
             body["status"] = "failed"
             return body, "failed"
     assert client is not None
-    require_api_key(settings)
+    produced = None
     try:
+        require_api_key(settings)
+        prepare_output(destination, overwrite=overwrite or existed)
+        prepare_output(meta_path_for(destination), overwrite=True)
         produced = synthesize(settings, text=text, voice=voice, client=client, retries=retries, timeout=timeout)
-        duration = commit_mp3(destination, produced.audio)
+        duration = commit_mp3(destination, produced.audio, overwrite=overwrite or existed)
         write_meta(
             destination,
             {
@@ -288,7 +307,12 @@ def _run_one(
                 "usage": {"usage_characters": produced.usage_characters},
             },
         )
-    except CliError as exc:
+    except (CliError, OSError) as error:
+        exc = error if isinstance(error, CliError) else CliError("OUTPUT_IO", "failed to save output")
+        if produced is not None:
+            exc.may_have_been_billed = True
+            exc.request_id = produced.request_id
+            exc.provider_trace_id = produced.trace_id
         exc.task_id = task_id
         body = exc.payload(PROVIDER)
         body["status"] = "failed"

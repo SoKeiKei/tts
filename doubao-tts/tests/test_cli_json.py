@@ -12,7 +12,7 @@ from tests.conftest import add_narrator, install_transport, minimal_mp3, ndjson_
 def test_version_and_help(runner) -> None:
     version = runner.invoke(app, ["--version"])
     assert version.exit_code == 0
-    assert "0.1.0" in version.stdout
+    assert version.stdout.strip() == "0.1.1"
     help_result = runner.invoke(app, ["--help"])
     assert help_result.exit_code == 0
     assert "synth" in help_result.stdout

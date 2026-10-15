@@ -136,7 +136,7 @@ def test_write_failure_cleans_partial(tmp_path: Path, monkeypatch: pytest.Monkey
     def boom(*_args, **_kwargs):
         raise PermissionError("denied")
 
-    monkeypatch.setattr("doubao_tts.audio.os.replace", boom)
+    monkeypatch.setattr("doubao_tts.audio.os.link", boom)
     with pytest.raises(CliError) as caught:
         commit_mp3(tmp_path / "a.mp3", minimal_mp3())
     assert caught.value.code == "OUTPUT_IO"
@@ -144,10 +144,98 @@ def test_write_failure_cleans_partial(tmp_path: Path, monkeypatch: pytest.Monkey
     assert list(tmp_path.glob("*.partial")) == []
 
 
+def test_commit_refuses_file_created_by_someone_else(tmp_path: Path) -> None:
+    target = tmp_path / "a.mp3"
+    target.write_bytes(b"owned-by-other-task")
+    with pytest.raises(CliError) as caught:
+        commit_mp3(target, minimal_mp3())
+    assert caught.value.code == "OUTPUT_EXISTS"
+    assert caught.value.may_have_been_billed is True
+    assert target.read_bytes() == b"owned-by-other-task"
+
+
+def test_timeout_reports_possible_charge(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY", "k-12345678")
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.TimeoutException("timed out waiting for response")
+
+    install_transport(monkeypatch, handler)
+    result = runner.invoke(
+        app,
+        ["synth", "--text", "超时", "--voice-id", "speaker-9", "--out", str(tmp_path / "a.mp3"), "--json"],
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 4
+    assert payload["may_have_been_billed"] is True
+    assert calls["n"] == 1
+    assert not (tmp_path / "a.mp3").exists()
+
+
+def test_unwritable_parent_does_not_call_api(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY", "k-12345678")
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, content=ndjson_success(minimal_mp3()))
+
+    install_transport(monkeypatch, handler)
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("blocked", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["synth", "--text", "不要请求", "--voice-id", "speaker-9", "--out", str(parent / "a.mp3"), "--json"],
+    )
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 5
+    assert payload["error"]["code"] == "OUTPUT_IO"
+    assert calls["n"] == 0
+
+
+def test_quota_stops_the_rest_of_the_batch(runner, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY", "k-12345678")
+    add_narrator(runner)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(402, content=b"{}")
+
+    install_transport(monkeypatch, handler)
+    manifest = tmp_path / "batch.json"
+    _manifest(
+        manifest,
+        [
+            {"id": "line-1", "text": "第一句", "output": "line-1.mp3"},
+            {"id": "line-2", "text": "第二句", "output": "line-2.mp3"},
+        ],
+    )
+    result = runner.invoke(app, ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path / "out"), "--json"])
+    payload = json.loads(result.stdout)
+    assert calls["n"] == 1
+    assert payload["results"][0]["error"]["code"] == "QUOTA_EXHAUSTED"
+    assert payload["results"][1]["status"] == "stopped"
+    assert payload["results"][1]["error"]["code"] == "QUOTA_EXHAUSTED"
+
+
+def test_doctor_probe_does_not_delete_existing_file(runner, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY", "k-12345678")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    keep = cfg / ".doubao-tts-write-probe"
+    keep.write_text("keep-me", encoding="utf-8")
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout
+    assert keep.read_text(encoding="utf-8") == "keep-me"
+
+
 def test_no_other_provider_import() -> None:
     import sys
 
     import doubao_tts
 
-    assert doubao_tts.__version__ == "0.1.0"
+    assert doubao_tts.__version__ == "0.1.1"
     assert not any(name.startswith("minimax") for name in sys.modules)
